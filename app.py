@@ -20,19 +20,17 @@ CFG = {
     "DATABASE_URL": st.secrets.get("DATABASE_URL", os.getenv("DATABASE_URL", "sqlite:///app.db")),
 }
 
-if not CFG["FERNET_KEY"]:
-    st.warning("FERNET_KEY ist nicht gesetzt. Bitte in .streamlit/secrets.toml oder als Umgebungsvariable hinterlegen.")
 storage = Storage(db_url=CFG["DATABASE_URL"])
 
 # --- sidebar ---
 st.sidebar.title("⚙️ Einstellungen")
+mode = "CONFIDENTIAL" if CFG["CLIENT_SECRET"] else "PUBLIC"
 with st.sidebar.expander("Konfiguration (read-only)", expanded=False):
-    st.code({k: ("***" if 'SECRET' in k or 'KEY' in k else v) for k,v in CFG.items() if k != "FERNET_KEY"}, language="json")
-    if CFG["FERNET_KEY"]:
-        st.text("FERNET_KEY gesetzt ✅")
-
-st.sidebar.markdown("---")
-st.sidebar.caption("SSO / Atlassian Login")
+    safe_cfg = dict(CFG)
+    if safe_cfg.get("CLIENT_SECRET"): safe_cfg["CLIENT_SECRET"] = "***"
+    if safe_cfg.get("FERNET_KEY"): safe_cfg["FERNET_KEY"] = "***"
+    st.code(safe_cfg, language="json")
+st.sidebar.caption(f"OAuth-Client-Modus: {mode} | redirect: {CFG['REDIRECT_URI']}")
 
 # --- Auth ---
 auth = AtlassianAuth(
@@ -108,6 +106,8 @@ with tab_tickets:
 with tab_plabels:
     st.subheader("P-Labels (Salesforce-Projektcode) zuweisen")
     st.caption("Format: **PXXXXXX** (eine führende 'P' + 6 Ziffern). Alte P-Labels werden vorher entfernt.")
+    projects = api.get_projects()
+    proj_options = {p['key']: f"{p['name']} ({p['key']})" for p in projects}
     selected_keys_pl = st.multiselect("Projekte auswählen", options=list(proj_options.keys()), format_func=lambda k: proj_options[k], key="pl_projects")
     search_text = st.text_input("Volltextsuche (optional)", "", key="pl_search")
     if selected_keys_pl:
@@ -160,6 +160,8 @@ with tab_plabels:
 with tab_worklog:
     st.subheader("Einzel-Worklog erfassen")
     # Pick issue
+    projects = api.get_projects()
+    proj_options = {p['key']: f"{p['name']} ({p['key']})" for p in projects}
     projects_wl = st.multiselect("Projekte auswählen", options=list(proj_options.keys()), format_func=lambda k: proj_options[k], key="wl_projects")
     search_wl = st.text_input("Volltextsuche (optional)", "", key="wl_search")
     issue_choice = None
@@ -222,7 +224,6 @@ with tab_csv:
                 for i, row in df.iterrows():
                     issue_key = row["Ticketnummer"]
                     date = pd.to_datetime(row["Datum"], dayfirst=True).date()
-                    # Uhrzeit may be HH:MM or HH:MM:SS
                     t = pd.to_datetime(row["Uhrzeit"]).time()
                     seconds = int(float(str(row["benötigte Zeit in h"]).replace(',', '.')) * 3600)
                     seconds = (seconds // 900) * 900  # round down to 15-min steps

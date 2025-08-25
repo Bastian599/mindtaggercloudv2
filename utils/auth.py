@@ -17,7 +17,7 @@ def _sha256(s: bytes) -> bytes:
 class AtlassianAuth:
     def __init__(self, client_id: str, client_secret: str, redirect_uri: str, scopes: str, fernet_key: str, storage):
         self.client_id     = client_id
-        self.client_secret = client_secret or ""   # optional bei PKCE
+        self.client_secret = (client_secret or "").strip()  # optional bei PKCE/Public
         self.redirect_uri  = redirect_uri
         self.scopes        = scopes
         self.storage       = storage
@@ -57,7 +57,7 @@ class AtlassianAuth:
         verifier_bytes = os.urandom(64)
         code_verifier  = _b64url(verifier_bytes)                # 86 Zeichen, base64url ohne '='
         code_challenge = _b64url(_sha256(code_verifier.encode("ascii")))
-        # (Optional) im SessionState ablegen – aber wir relyen NICHT darauf:
+        # optional zusätzlich im SessionState (Fallback)
         st.session_state["pkce_verifier"] = code_verifier
 
         if not self.fernet:
@@ -97,6 +97,27 @@ class AtlassianAuth:
         self._token = None
         self._cloud = None
 
+    # ---- internes Helferlein für Token-POST (Public vs. Confidential) ----
+    def _post_token(self, data: dict):
+        """
+        POST to Atlassian token endpoint using application/x-www-form-urlencoded.
+        Uses HTTP Basic (id:secret) if client_secret is present (confidential client).
+        For public clients (no secret), puts client_id in the body and no Authorization header.
+        """
+        url = f"{AUTH_BASE}/oauth/token"
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        if self.client_secret:
+            # Confidential client → Basic Auth
+            b64 = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode("utf-8")).decode("ascii")
+            headers["Authorization"] = f"Basic {b64}"
+            data = {k: v for k, v in data.items() if k != "client_secret"}
+        else:
+            # Public client → client_id in body, keine Auth-Header
+            data["client_id"] = self.client_id
+
+        return requests.post(url, data=data, headers=headers, timeout=30)
+
     def _handle_callback(self, code: str, enc_state: str):
         # State entschlüsseln + TTL prüfen
         try:
@@ -112,17 +133,20 @@ class AtlassianAuth:
             st.error("PKCE code_verifier fehlt. Bitte Login erneut starten.")
             return
 
-        # Token-Austausch: form-encoded & OHNE client_secret (PKCE public)
+        # Token-Austausch: form-encoded; PKCE + ggf. Basic Auth
         data = {
             "grant_type": "authorization_code",
-            "client_id": self.client_id,
             "code": code,
             "redirect_uri": self.redirect_uri,
             "code_verifier": code_verifier,
         }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        r = requests.post(f"{AUTH_BASE}/oauth/token", data=data, headers=headers, timeout=30)
+        r = self._post_token(data)
         if r.status_code != 200:
+            st.warning({
+                "mode": "CONFIDENTIAL" if self.client_secret else "PUBLIC",
+                "redirect_uri_used": self.redirect_uri,
+                "has_code_verifier": True,
+            })
             st.error(f"Token-Austausch fehlgeschlagen: {r.status_code} {r.text}")
             return
 
@@ -150,14 +174,11 @@ class AtlassianAuth:
     def refresh_token(self) -> bool:
         if not self._token or not self._token.get("refresh_token"):
             return False
-        # Refresh: form-encoded; ohne secret funktioniert mit Atlassian PKCE i.d.R. ebenfalls
         data = {
             "grant_type": "refresh_token",
-            "client_id": self.client_id,
             "refresh_token": self._token["refresh_token"],
         }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        r = requests.post(f"{AUTH_BASE}/oauth/token", data=data, headers=headers, timeout=30)
+        r = self._post_token(data)
         if r.status_code != 200:
             return False
         tok = r.json()
