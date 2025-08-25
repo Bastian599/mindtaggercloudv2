@@ -88,7 +88,6 @@ class Storage:
         ts = int(time.time())
         if self.use_pg:
             cur = self._conn.cursor()
-            # Update latest row
             cur.execute("""UPDATE user_oauth SET token_json=%s, saved_at=%s
                            WHERE id = (SELECT id FROM user_oauth ORDER BY id DESC LIMIT 1)""",
                         (json.dumps(token), ts))
