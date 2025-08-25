@@ -1,4 +1,4 @@
-# utils/storage.py
+# utils/storage.py (dynamic Postgres/SQLite storage with schema resilience)
 import os, json, time
 from typing import Optional, Dict, Any
 
@@ -42,7 +42,6 @@ class Storage:
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}sslmode=require"
             conn = psycopg2.connect(url)
-            # 👉 immer auf public schalten, damit wir nicht in falschem Schema landen
             with conn.cursor() as cur:
                 cur.execute("SET search_path TO public")
             conn.commit()
@@ -53,7 +52,6 @@ class Storage:
                 path = self.db_url.replace("sqlite:///","",1)
             return sqlite3.connect(path, check_same_thread=False)
 
-    # ---------- PG schema helpers ----------
     def _pg_table_columns(self, table: str) -> set:
         cur = self._conn.cursor()
         cur.execute("""
@@ -73,13 +71,16 @@ class Storage:
     def _init(self):
         if self.use_pg:
             cur = self._conn.cursor()
-            # Basis-Create nur mit PK, Spalten migrieren wir idempotent
             cur.execute("CREATE TABLE IF NOT EXISTS public.user_oauth (id SERIAL PRIMARY KEY)")
             cur.execute("CREATE TABLE IF NOT EXISTS public.undo_worklog (id SERIAL PRIMARY KEY)")
             self._conn.commit()
-            # Spalten sicherstellen
             self._pg_ensure_columns("user_oauth", REQUIRED_USER_OAUTH_COLS)
             self._pg_ensure_columns("undo_worklog", REQUIRED_UNDO_COLS)
+            cols = self._pg_table_columns("user_oauth")
+            if "site_url" not in cols:
+                cur = self._conn.cursor()
+                cur.execute("ALTER TABLE public.user_oauth ADD COLUMN IF NOT EXISTS site_url TEXT")
+                self._conn.commit()
         else:
             c = self._conn.cursor()
             c.execute("""CREATE TABLE IF NOT EXISTS user_oauth (
@@ -101,44 +102,50 @@ class Storage:
             )""")
             self._conn.commit()
 
-    # ------ OAuth persistence with retry on missing column ------
+    def _dynamic_insert(self, table: str, data: Dict[str, Any]):
+        if self.use_pg:
+            cols = self._pg_table_columns(table)
+            preferred = ["email","site_url","cloud_id","cloud_url","cloud_name","token_json","cloud_json","saved_at"]
+            insert_cols = [c for c in preferred if c in cols and c in data]
+            insert_cols += [c for c in data.keys() if c in cols and c not in insert_cols]
+            placeholders = ",".join(["%s"] * len(insert_cols))
+            col_list = ",".join(insert_cols)
+            values = tuple(data[c] for c in insert_cols)
+            sql = f"INSERT INTO public.{table} ({col_list}) VALUES ({placeholders})"
+            cur = self._conn.cursor()
+            cur.execute(sql, values)
+            self._conn.commit()
+        else:
+            c = self._conn.cursor()
+            c.execute(f"PRAGMA table_info({table})")
+            cols = {r[1] for r in c.fetchall()}
+            insert_cols = [k for k in data.keys() if k in cols]
+            placeholders = ",".join(["?"] * len(insert_cols))
+            col_list = ",".join(insert_cols)
+            values = tuple(data[c] for c in insert_cols)
+            sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
+            c.execute(sql, values)
+            self._conn.commit()
+
     def save_oauth(self, email: str, token: dict, cloud: dict):
         ts = int(time.time())
         cloud = cloud or {}
-        cloud_id   = cloud.get("id")
-        cloud_url  = cloud.get("url")
-        cloud_name = cloud.get("name")
+        record = {
+            "email":      email or "unknown",
+            "cloud_id":   cloud.get("id"),
+            "cloud_url":  cloud.get("url"),
+            "cloud_name": cloud.get("name"),
+            "site_url":   cloud.get("url"),  # für evtl. NOT NULL alte Schemas
+            "token_json": json.dumps(token),
+            "cloud_json": json.dumps(cloud),
+            "saved_at":   ts,
+        }
         try:
-            if self.use_pg:
-                cur = self._conn.cursor()
-                cur.execute(
-                    """INSERT INTO public.user_oauth
-                       (email, cloud_id, cloud_url, cloud_name, token_json, cloud_json, saved_at)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                    (email, cloud_id, cloud_url, cloud_name, json.dumps(token), json.dumps(cloud), ts)
-                )
-                self._conn.commit()
-            else:
-                c = self._conn.cursor()
-                c.execute(
-                    """INSERT INTO user_oauth
-                       (email, cloud_id, cloud_url, cloud_name, token_json, cloud_json, saved_at)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (email, cloud_id, cloud_url, cloud_name, json.dumps(token), json.dumps(cloud), ts)
-                )
-                self._conn.commit()
+            self._dynamic_insert("user_oauth", record)
         except Exception as e:
             if self.use_pg and isinstance(e, pg_errors.UndefinedColumn):
-                # Falls wir doch in einem "alten" Schema gelandet sind → migrieren & 1x retry
                 self._init()
-                cur = self._conn.cursor()
-                cur.execute(
-                    """INSERT INTO public.user_oauth
-                       (email, cloud_id, cloud_url, cloud_name, token_json, cloud_json, saved_at)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s)""",
-                    (email, cloud_id, cloud_url, cloud_name, json.dumps(token), json.dumps(cloud), ts)
-                )
-                self._conn.commit()
+                self._dynamic_insert("user_oauth", record)
             else:
                 raise
 
@@ -161,7 +168,6 @@ class Storage:
             )
             self._conn.commit()
 
-    # ------ Undo storage ------
     def set_last_worklog(self, email: str, worklog_id: str, issue_key: str):
         ts = int(time.time())
         if self.use_pg:
@@ -224,7 +230,6 @@ class Storage:
             )
             self._conn.commit()
 
-    # ------ Health & Diagnostics ------
     def ping(self) -> Dict[str,Any]:
         try:
             if self.use_pg:
@@ -241,21 +246,3 @@ class Storage:
                 return {"ok": True, "driver": "sqlite3", "version": ver}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-
-    def diagnostics(self) -> Dict[str,Any]:
-        """Return current columns for both tables (helps verify schema)."""
-        out = {}
-        try:
-            if self.use_pg:
-                for t in ["user_oauth","undo_worklog"]:
-                    cols = list(self._pg_table_columns(t))
-                    out[t] = sorted(cols)
-            else:
-                c = self._conn.cursor()
-                for t in ["user_oauth","undo_worklog"]:
-                    c.execute(f"PRAGMA table_info({t})")
-                    out[t] = [r[1] for r in c.fetchall()]
-            out["ok"] = True
-        except Exception as e:
-            out = {"ok": False, "error": str(e)}
-        return out

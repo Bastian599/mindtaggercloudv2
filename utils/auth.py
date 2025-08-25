@@ -1,4 +1,4 @@
-# utils/auth.py
+# utils/auth.py (PKCE + Public/Confidential)
 import streamlit as st
 import time, os, base64, json, requests
 from urllib.parse import urlencode
@@ -55,7 +55,7 @@ class AtlassianAuth:
 
         # PKCE vorbereiten
         verifier_bytes = os.urandom(64)
-        code_verifier  = _b64url(verifier_bytes)                # 86 Zeichen, base64url ohne '='
+        code_verifier  = _b64url(verifier_bytes)                # base64url ohne '='
         code_challenge = _b64url(_sha256(code_verifier.encode("ascii")))
         # optional zusätzlich im SessionState (Fallback)
         st.session_state["pkce_verifier"] = code_verifier
@@ -97,13 +97,8 @@ class AtlassianAuth:
         self._token = None
         self._cloud = None
 
-    # ---- internes Helferlein für Token-POST (Public vs. Confidential) ----
+    # ---- Token POST helper ----
     def _post_token(self, data: dict):
-        """
-        POST to Atlassian token endpoint using application/x-www-form-urlencoded.
-        Uses HTTP Basic (id:secret) if client_secret is present (confidential client).
-        For public clients (no secret), puts client_id in the body and no Authorization header.
-        """
         url = f"{AUTH_BASE}/oauth/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
 
@@ -113,7 +108,7 @@ class AtlassianAuth:
             headers["Authorization"] = f"Basic {b64}"
             data = {k: v for k, v in data.items() if k != "client_secret"}
         else:
-            # Public client → client_id in body, keine Auth-Header
+            # Public client → client_id in body
             data["client_id"] = self.client_id
 
         return requests.post(url, data=data, headers=headers, timeout=30)
@@ -133,7 +128,7 @@ class AtlassianAuth:
             st.error("PKCE code_verifier fehlt. Bitte Login erneut starten.")
             return
 
-        # Token-Austausch: form-encoded; PKCE + ggf. Basic Auth
+        # Token-Austausch
         data = {
             "grant_type": "authorization_code",
             "code": code,

@@ -1,4 +1,4 @@
-# app.py
+# app.py (PL-Filter, single-select default, combined columns, 3 P-Label-Modi)
 import streamlit as st
 import pandas as pd
 import os
@@ -58,10 +58,38 @@ if not auth.is_authenticated():
 
 api = JiraAPI(auth)
 profile = api.get_myself()
+account_id = profile.get("accountId")
 st.sidebar.success(f"Angemeldet als {profile.get('displayName', profile.get('emailAddress',''))}")
 site_url = auth.get_cloud_url()
 if site_url:
     st.sidebar.write(f"Cloud: {site_url}")
+
+# --- Project list with PL filter ---
+all_projects = api.get_projects()
+def filter_projects_pl(projects, my_id):
+    out = []
+    for p in projects:
+        lead = (p.get("lead") or {}).get("accountId")
+        if lead and my_id and lead == my_id:
+            out.append(p)
+    # Fallback: wenn nichts erkannt, gib alle zurück
+    return out if out else projects
+
+only_pl = st.sidebar.checkbox("Nur Projekte, bei denen ich Projektleiter bin", value=True)
+projects = filter_projects_pl(all_projects, account_id) if only_pl else all_projects
+proj_map = {p['key']: f"{p['name']} ({p['key']})" for p in projects}
+
+# Single-select standardmäßig, optional Multi
+multi = st.sidebar.checkbox("Mehrere Projekte auswählen", value=False)
+if not projects:
+    st.warning("Keine Projekte gefunden (ggf. fehlen Berechtigungen).")
+    st.stop()
+
+if multi:
+    selected_keys_global = st.sidebar.multiselect("Projekte", options=list(proj_map.keys()), format_func=lambda k: proj_map[k])
+else:
+    selected_single = st.sidebar.selectbox("Projekt", options=list(proj_map.keys()), format_func=lambda k: proj_map[k])
+    selected_keys_global = [selected_single] if selected_single else []
 
 # --- Tabs ---
 tab_tickets, tab_plabels, tab_worklog, tab_csv, tab_health = st.tabs(
@@ -71,102 +99,136 @@ tab_tickets, tab_plabels, tab_worklog, tab_csv, tab_health = st.tabs(
 # --------------- Tickets Tab -----------------
 with tab_tickets:
     st.subheader("Tickets anzeigen & filtern")
-    # Load projects
-    projects = api.get_projects()
-    proj_options = {p['key']: f"{p['name']} ({p['key']})" for p in projects}
-    selected_keys = st.multiselect("Projekte auswählen", options=list(proj_options.keys()), format_func=lambda k: proj_options[k])
     query = st.text_input("Volltextsuche (optional)", "")
-    if selected_keys:
+    if selected_keys_global:
         with st.spinner("Tickets werden geladen..."):
-            issues = api.search_issues(selected_keys, text=query, exclude_statuses=["Closed","Geschlossen","Abgebrochen"])
+            issues = api.search_issues(selected_keys_global, text=query, exclude_statuses=["Closed","Geschlossen","Abgebrochen"])
         if not issues:
             st.info("Keine Tickets gefunden.")
         else:
-            # Build dataframe
             rows = []
             for it in issues:
                 fields = it.get("fields", {})
                 labels = fields.get("labels", []) or []
+                p_labels = extract_p_labels(labels)
                 k = it["key"]
                 link = f"{site_url}/browse/{k}" if site_url else ""
                 rows.append({
-                    "Key": k,
+                    "Ticket (P-Label)": f"{k} ({p_labels[0] if p_labels else '—'})",
                     "Summary": fields.get("summary",""),
                     "Status": fields.get("status",{}).get("name",""),
                     "Assignee": (fields.get("assignee") or {}).get("displayName",""),
-                    "Labels": ", ".join(labels),
-                    "P-Label": ", ".join(extract_p_labels(labels)),
-                    "Link": link
+                    "Öffnen": link
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
+            try:
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={"Öffnen": st.column_config.LinkColumn("Öffnen in Jira")}
+                )
+            except Exception:
+                st.dataframe(df, use_container_width=True, hide_index=True)
             st.caption("Hinweis: 'Closed/Geschlossen/Abgebrochen' wurden ausgeschlossen; 'Erledigt' bleibt sichtbar.")
 
 # --------------- P-Labels Tab -----------------
 with tab_plabels:
     st.subheader("P-Labels (Salesforce-Projektcode) zuweisen")
     st.caption("Format: **PXXXXXX** (eine führende 'P' + 6 Ziffern). Alte P-Labels werden vorher entfernt.")
-    projects = api.get_projects()
-    proj_options = {p['key']: f"{p['name']} ({p['key']})" for p in projects}
-    selected_keys_pl = st.multiselect("Projekte auswählen", options=list(proj_options.keys()), format_func=lambda k: proj_options[k], key="pl_projects")
     search_text = st.text_input("Volltextsuche (optional)", "", key="pl_search")
-    if selected_keys_pl:
+    if selected_keys_global:
         with st.spinner("Tickets werden geladen..."):
-            issues_pl = api.search_issues(selected_keys_pl, text=search_text, exclude_statuses=["Closed","Geschlossen","Abgebrochen"])
-        if issues_pl:
-            # selectable
-            issue_options = {it["key"]: f"{it['key']} – {it['fields'].get('summary','')[:80]}" for it in issues_pl}
-            picked = st.multiselect("Tickets auswählen", options=list(issue_options.keys()), format_func=lambda k: issue_options[k], key="pl_pick")
-            new_plabel = st.text_input("Neues P-Label", placeholder="z. B. P123456", key="pl_value").strip().upper()
-            if new_plabel and not is_p_label(new_plabel):
-                st.error("Ungültiges Format. Erlaubt ist: P + 6 Ziffern (z. B. P123456).")
-            col_prev, col_apply = st.columns(2)
-            with col_prev:
-                if st.button("👀 Vorschau erzeugen", disabled=not (picked and is_p_label(new_plabel))):
-                    preview_rows = []
-                    for it in issues_pl:
-                        if it["key"] in picked:
-                            old_labels = it["fields"].get("labels", []) or []
-                            new_labels = compute_new_labels(old_labels, new_plabel)
-                            preview_rows.append({
-                                "Key": it["key"],
-                                "Summary": it["fields"].get("summary",""),
-                                "Alt-Labels": ", ".join(old_labels),
-                                "Neu-Labels": ", ".join(new_labels),
-                            })
-                    st.session_state["pl_preview"] = pd.DataFrame(preview_rows)
-                if "pl_preview" in st.session_state:
-                    st.dataframe(st.session_state["pl_preview"], use_container_width=True, hide_index=True)
-            with col_apply:
-                submit_apply = st.button("✅ Anwenden (Bulk)", type="primary", disabled="pl_preview" not in st.session_state)
-                if submit_apply and st.session_state.get("pl_preview") is not None:
-                    rows = st.session_state["pl_preview"].to_dict(orient="records")
-                    prog = st.progress(0, text="Aktualisiere Labels...")
-                    done, errs = 0, []
-                    total = len(rows)
-                    for idx, row in enumerate(rows, start=1):
-                        ok, err = api.update_issue_labels(row["Key"], row["Neu-Labels"].split(", ") if row["Neu-Labels"] else [])
-                        if not ok:
-                            errs.append(f'{row["Key"]}: {err}')
-                        done += 1
-                        prog.progress(int(100*done/total), text=f"Aktualisiere Labels... ({done}/{total})")
-                    prog.empty()
-                    st.success(f"Fertig. {done - len(errs)}/{total} erfolgreich.")
-                    if errs:
-                        st.error("Fehler:\n" + "\n".join(errs))
-                    st.session_state.pop("pl_preview", None)
+            issues_pl = api.search_issues(selected_keys_global, text=search_text, exclude_statuses=["Closed","Geschlossen","Abgebrochen"])
+    else:
+        issues_pl = []
+
+    option = st.radio(
+        "Modus für P-Label-Vergabe",
+        ["1) Alle Tickets ohne P-Label versehen",
+         "2) Alle Tickets auf neues P-Label setzen",
+         "3) Einzeln ausgewählte Tickets"],
+        index=0
+    )
+    new_plabel = st.text_input("Neues P-Label", placeholder="z. B. P123456", key="pl_value").strip().upper()
+    if new_plabel and not is_p_label(new_plabel):
+        st.error("Ungültiges Format. Erlaubt ist: P + 6 Ziffern (z. B. P123456).")
+
+    candidates = []
+    if issues_pl:
+        if option.startswith("1"):
+            candidates = [it for it in issues_pl if len(extract_p_labels(it["fields"].get("labels", []) or [])) == 0]
+        elif option.startswith("2"):
+            candidates = list(issues_pl)  # alle
+        elif option.startswith("3"):
+            # Tabelle mit auswählbaren Tickets
+            table_rows = []
+            for it in issues_pl:
+                labels = it["fields"].get("labels", []) or []
+                p = ", ".join(extract_p_labels(labels)) or "—"
+                table_rows.append({
+                    "Auswählen": False,
+                    "Key": it["key"],
+                    "P-Label": p,
+                    "Summary": it["fields"].get("summary","")[:120],
+                })
+            edf = pd.DataFrame(table_rows)
+            st.markdown("**Tickets auswählen:**")
+            edf = st.data_editor(
+                edf,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                column_config={
+                    "Auswählen": st.column_config.CheckboxColumn("Auswählen"),
+                }
+            )
+            picked_keys = set(edf[edf["Auswählen"] == True]["Key"].tolist())
+            candidates = [it for it in issues_pl if it["key"] in picked_keys]
+
+    col_prev, col_apply = st.columns(2)
+    with col_prev:
+        if st.button("👀 Vorschau erzeugen", disabled=not (candidates and is_p_label(new_plabel))):
+            preview_rows = []
+            for it in candidates:
+                old_labels = it["fields"].get("labels", []) or []
+                new_labels = compute_new_labels(old_labels, new_plabel)
+                preview_rows.append({
+                    "Key": it["key"],
+                    "Summary": it["fields"].get("summary","")[:120],
+                    "Alt-Labels": ", ".join(old_labels),
+                    "Neu-Labels": ", ".join(new_labels),
+                })
+            st.session_state["pl_preview"] = pd.DataFrame(preview_rows)
+        if "pl_preview" in st.session_state:
+            st.dataframe(st.session_state["pl_preview"], use_container_width=True, hide_index=True)
+    with col_apply:
+        submit_apply = st.button("✅ Anwenden (Bulk)", type="primary", disabled="pl_preview" not in st.session_state or not is_p_label(new_plabel))
+        if submit_apply and st.session_state.get("pl_preview") is not None:
+            rows = st.session_state["pl_preview"].to_dict(orient="records")
+            prog = st.progress(0, text="Aktualisiere Labels...")
+            done, errs = 0, []
+            total = len(rows)
+            for idx, row in enumerate(rows, start=1):
+                ok, err = api.update_issue_labels(row["Key"], row["Neu-Labels"].split(", ") if row["Neu-Labels"] else [])
+                if not ok:
+                    errs.append(f'{row["Key"]}: {err}')
+                done += 1
+                prog.progress(int(100*done/total), text=f"Aktualisiere Labels... ({done}/{total})")
+            prog.empty()
+            st.success(f"Fertig. {done - len(errs)}/{total} erfolgreich.")
+            if errs:
+                st.error("Fehler:\n" + "\n".join(errs))
+            st.session_state.pop("pl_preview", None)
 
 # --------------- Einzel-Worklog Tab -----------------
 with tab_worklog:
     st.subheader("Einzel-Worklog erfassen")
-    # Pick issue
-    projects = api.get_projects()
-    proj_options = {p['key']: f"{p['name']} ({p['key']})" for p in projects}
-    projects_wl = st.multiselect("Projekte auswählen", options=list(proj_options.keys()), format_func=lambda k: proj_options[k], key="wl_projects")
+    # Ticketauswahl nutzt globalen Projektfilter
     search_wl = st.text_input("Volltextsuche (optional)", "", key="wl_search")
     issue_choice = None
-    if projects_wl:
-        issues_wl = api.search_issues(projects_wl, text=search_wl, limit=50, exclude_statuses=[])
+    if selected_keys_global:
+        issues_wl = api.search_issues(selected_keys_global, text=search_wl, limit=50, exclude_statuses=[])
         if issues_wl:
             opts = {it["key"]: f"{it['key']} – {it['fields'].get('summary','')[:80]}" for it in issues_wl}
             issue_choice = st.selectbox("Ticket", options=list(opts.keys()), format_func=lambda k: opts[k])
