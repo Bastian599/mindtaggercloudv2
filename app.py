@@ -7,6 +7,7 @@ from utils.jira_api import JiraAPI, is_p_label, extract_p_labels, compute_new_la
 from utils.csv_utils import parse_worklog_csv, validate_worklog_rows
 from utils.health import run_health_checks
 from utils.storage import Storage
+from datetime import datetime
 
 st.set_page_config(page_title="Jira Tickets & Worklogs", page_icon="🧩", layout="wide")
 
@@ -290,7 +291,7 @@ with tab_csv:
                     seconds = int(float(str(row["benötigte Zeit in h"]).replace(',', '.')) * 3600)
                     seconds = (seconds // 900) * 900  # round down to 15-min steps
                     comment = str(row.get("Beschreibung","") or "")
-                    started_dt = pd.Timestamp.combine(pd.Timestamp(date), pd.Timestamp(t)).to_pydatetime()
+                    started_dt = datetime.combine(date, t)
                     ok, res = api.add_worklog(issue_key, started_dt, seconds, comment)
                     results.append((issue_key, ok, res if not ok else res.get("id")))
                     prog.progress(int(100*(i+1)/len(df)), text=f"Import läuft... ({i+1}/{len(df)})")
