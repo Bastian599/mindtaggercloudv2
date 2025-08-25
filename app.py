@@ -9,6 +9,8 @@ from utils.csv_utils import parse_worklog_csv, validate_worklog_rows
 from utils.health import run_health_checks
 from utils.storage import Storage
 
+__APP_BUILD__ = '2025-08-25 23:54:49'
+
 st.set_page_config(page_title="Jira Tickets & Worklogs", page_icon="🧩", layout="wide")
 
 # --- load config from secrets or env ---
@@ -131,7 +133,7 @@ with tab_tickets:
                 )
             except Exception:
                 st.dataframe(df, use_container_width=True, hide_index=True)
-            st.caption("Hinweis: 'Closed/Geschlossen/Abgebrochen' wurden ausgeschlossen; 'Erledigt' bleibt sichtbar.")
+            st.caption("Hinweis: 'Closed/Geschlossen/Abgebrochen' sind ausgeschlossen; 'Erledigt' bleibt sichtbar. (Build: 2025-08-25 23:54:49)")
 
 # --------------- P-Labels Tab -----------------
 with tab_plabels:
