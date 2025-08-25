@@ -97,7 +97,7 @@ class AtlassianAuth:
             st.error("Ungültiger oder abgelaufener OAuth-State.")
             return
         # Exchange code
-        verifier = st.session_state.get("pkce_verifier", "")
+        verifier = state.get("code_verifier") or st.session_state.get("pkce_verifier", "")
         data = {
             "grant_type": "authorization_code",
             "client_id": self.client_id,
