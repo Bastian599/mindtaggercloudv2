@@ -2,12 +2,12 @@
 import streamlit as st
 import pandas as pd
 import os
+from datetime import datetime
 from utils.auth import AtlassianAuth
 from utils.jira_api import JiraAPI, is_p_label, extract_p_labels, compute_new_labels
 from utils.csv_utils import parse_worklog_csv, validate_worklog_rows
 from utils.health import run_health_checks
 from utils.storage import Storage
-from datetime import datetime
 
 st.set_page_config(page_title="Jira Tickets & Worklogs", page_icon="🧩", layout="wide")
 
@@ -288,8 +288,10 @@ with tab_csv:
                     issue_key = row["Ticketnummer"]
                     date = pd.to_datetime(row["Datum"], dayfirst=True).date()
                     t = pd.to_datetime(row["Uhrzeit"]).time()
-                    seconds = int(float(str(row["benötigte Zeit in h"]).replace(',', '.')) * 3600)
-                    seconds = (seconds // 900) * 900  # round down to 15-min steps
+                    raw_hours = float(str(row["benötigte Zeit in h"]).replace(',', '.'))
+                    seconds = int(round(raw_hours * 3600 / 900) * 900)
+                    if seconds <= 0:
+                        seconds = 900
                     comment = str(row.get("Beschreibung","") or "")
                     started_dt = datetime.combine(date, t)
                     ok, res = api.add_worklog(issue_key, started_dt, seconds, comment)
