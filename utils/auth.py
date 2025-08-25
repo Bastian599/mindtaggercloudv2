@@ -106,7 +106,8 @@ class AtlassianAuth:
             "redirect_uri": self.redirect_uri,
             "code_verifier": verifier,
         }
-        r = requests.post(f"{AUTH_BASE}/oauth/token", json=data, timeout=30)
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        r = requests.post(f"{AUTH_BASE}/oauth/token", data=data, headers=headers, timeout=30)
         if r.status_code != 200:
             st.error(f"Token-Austausch fehlgeschlagen: {r.status_code} {r.text}")
             return
@@ -137,7 +138,8 @@ class AtlassianAuth:
             "client_secret": self.client_secret,
             "refresh_token": self._token["refresh_token"],
         }
-        r = requests.post(f"{AUTH_BASE}/oauth/token", json=data, timeout=30)
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        r = requests.post(f"{AUTH_BASE}/oauth/token", data=data, headers=headers, timeout=30)
         if r.status_code != 200:
             return False
         tok = r.json()
